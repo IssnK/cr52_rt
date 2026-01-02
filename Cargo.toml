@@ -1,0 +1,19 @@
+[package]
+name = "cr52_rt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+panic-halt = "0.2"
+
+[profile.dev]
+debug = true
+lto = false
+
+[profile.release]
+debug = true
+lto = false
+opt-level = "s"
+
+[build-dependencies]
+cc = "1.0"

@@ -1,0 +1,10 @@
+[build]
+target = "armv8r-none-eabihf"
+
+[target.armv8r-none-eabihf]
+rustflags = [
+    "-C", "link-arg=-Tlink.ld",
+]
+
+[unstable]
+build-std = ["core"]
