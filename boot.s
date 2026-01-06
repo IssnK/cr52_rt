@@ -1,6 +1,10 @@
+    .syntax unified
+    .arch armv8-r
+    .arm
+
 /* boot.s */
 .section .text._vector_table, "ax", %progbits
-.align 6   /* ARMv8-R requires 64-byte alignment for VBAR */
+.align 5
 .global _vector_table
 
 _vector_table:
@@ -13,57 +17,81 @@ _vector_table:
     b irq_handler_asm       /* 0x18: IRQ */
     b fiq_handler_asm       /* 0x1C: FIQ */
 
+/* CPU Mode definitions */
+.equ ARM_MODE_USR, 0x10
+.equ ARM_MODE_FIQ, 0x11
+.equ ARM_MODE_IRQ, 0x12
+.equ ARM_MODE_SVC, 0x13
+.equ ARM_MODE_ABT, 0x17
+.equ ARM_MODE_UND, 0x1B
+.equ ARM_MODE_SYS, 0x1F
+.equ ARM_MODE_HYP, 0x1A
+
+/* CPSR bit definitions */
+.equ I_BIT, 0x80    /* IRQ disable bit */
+.equ F_BIT, 0x40    /* FIQ disable bit */
+
 .section .boot, "ax", %progbits
+.align 4
 .global _reset
 
 _reset:
+    cpsid if                     @ Disable IRQ and FIQ
+
     /* 1. Initialize EL2 (Hypervisor) */
     /* Set the Hyp Vector Base Address */
     ldr r0, =_vector_table
     mcr p15, 4, r0, c12, c0, 0   @ HVBAR
+    dsb sy
+    isb
 
-    /* 2. Configure HCR (Hypervisor Configuration Register) 
-       Set bit 31 (Register Width) to 0 for AArch32 EL1 */
-    mov r0, #0
-    mcr p15, 4, r0, c1, c1, 0
-
-    /* 3. Prepare to drop to EL1 (SVC Mode) */
-    /* SPSR_hyp: M[4:0] = 0b10011 (SVC), F/I/A bits masked (0x1D3) */
-    ldr r0, =0x1D3
-    msr spsr_hyp, r0
+    mrs r0, cpsr
+    bic r0, r0, #0x1F             @ Clear mode bits
+    orr r0, r0, #0x13             @ Set to Hyp mode (0b10011)
+    msr spsr_cxsf, r0
 
     /* Set ELR_hyp to our EL1 entry point */
     ldr r0, =el1_entry
     msr elr_hyp, r0
+
+    /* Enable Timer access from EL1 */
+    mov r0, #0x1                  @ Enable EL1 access to physical timer
+    mcr p15, 4, r0, c14, c2, 0
+    isb
 
     /* 4. Transition to EL1 */
     eret
 
 el1_entry:
     /* Now in EL1 (SVC mode) */
-    /* Set EL1 Vector Base Address */
-    ldr r0, =_vector_table
-    mcr p15, 0, r0, c12, c0, 0   @ VBAR
-
-    /* 5. Enable FPU/SIMD (Required for Rust) */
-    mrc p15, 0, r0, c1, c0, 2    @ CPACR
-    orr r0, r0, #(0xF << 20)     @ Enable CP10 and CP11
-    mcr p15, 0, r0, c1, c0, 2
-    isb
-    mov r0, #0x40000000          @ FPEXC Enable bit
-    vmsr fpexc, r0
-
-    /* 6. Setup Stacks */
-    cps #0x12                    @ IRQ Mode
-    ldr sp, =__stack_irq_top
     
-    cps #0x11                    @ FIQ Mode
+    /* 6. Setup Stacks */
+    /* IRQ Mode */
+    mrs r0, cpsr
+    bic r0, r0, #0x1F             @ Clear mode bits
+    orr r0, r0, #(ARM_MODE_IRQ | I_BIT | F_BIT)  @ IRQ Mode with IRQ/FIQ disabled
+    msr cpsr_c, r0
+    ldr sp, =__stack_irq_top
+
+    /* FIQ Mode */
+    mrs r0, cpsr
+    bic r0, r0, #0x1F             @ Clear mode bits
+    orr r0, r0, #(ARM_MODE_FIQ | I_BIT | F_BIT)  @ FIQ Mode with IRQ/FIQ disabled
+    msr cpsr_c, r0
     ldr sp, =__stack_fiq_top
 
-    cps #0x17                    @ Abort Mode
+    /* Abort Mode */
+    mrs r0, cpsr
+    bic r0, r0, #0x1F             @ Clear mode bits
+    orr r0, r0, #(ARM_MODE_ABT | I_BIT | F_BIT)  @ Abort Mode with IRQ/FIQ disabled
+    msr cpsr_c, r0
     ldr sp, =__stack_abt_top
 
-    cps #0x13                    @ SVC Mode (Return to default)
+    /* SVC Mode */
+    mrs r0, cpsr
+    bic r0, r0, #0x1F             @ Clear mode bits
+    orr r0, r0, #(ARM_MODE_SVC | I_BIT | F_BIT)  @ SVC Mode with IRQ/FIQ disabled
+    msr cpsr_c, r0
     ldr sp, =__stack_svc_top
 
     /* 7. Clear BSS (Recommended to do in ASM for Rust) */
@@ -71,8 +99,20 @@ el1_entry:
     ldr r1, =__bss_end
     mov r2, #0
 
+1:
+    cmp r0, r1
+    bge 2f
+    str r2, [r0], #4
+    b 1b
+2:
+    dsb sy
+    isb
+
     /* Jump to Rust */
     bl rust_main
+
+halt_loop:
+    b halt_loop
 
 /* --- Exception Handlers --- */
 
